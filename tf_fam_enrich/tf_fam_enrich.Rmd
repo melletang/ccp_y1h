@@ -1,0 +1,206 @@
+---
+title: "tffamenrich_redo"
+author: "Michelle Tang"
+date: "2/28/2019"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+```
+
+```{r}
+y1h<-readxl::read_excel("~/Documents/Research/R_Code/ConvertY1H/CCP_rematch/tca_network_2019.xls")
+y1h <- y1h %>% select(Promoter_AGI, TF_AGI, Enzyme) %>% unique()
+prom_info <- readxl::read_excel("TCA_locenz.xlsx")
+y1h <- full_join(y1h, prom_info) %>% unique()
+
+tffamlist <- read.csv("TFfamilies_AtTFDB.csv", header = FALSE) %>% unique()
+tffamlist$V2 <- toupper(tffamlist$V2)
+colnames(tffamlist) <- c("Family", "TF_AGI")
+
+#check for duplicates
+dupTF<-tffamlist[which(duplicated(tffamlist$TF_AGI)),] %>% select(TF_AGI) %>% unique()
+View(tffamlist %>% filter(TF_AGI %in% dupTF$TF_AGI))
+tffamlist <- tffamlist[-which(tffamlist$Family=="ABI3VP1" & tffamlist$TF_AGI=="AT4G30080"),]
+
+
+tffamlist2 <- read.csv("~/Documents/Research/TF_families/tffam_data/tf_nofam_AtTFDB.csv", header = TRUE) %>% unique()
+tffamlist2 <- tffamlist2[,c(2,1)]
+colnames(tffamlist2) <- c("Family", "TF_AGI")
+tffamlist <- rbind(tffamlist, tffamlist2)
+tffamlist$Family <- gsub("_", "-", tffamlist$Family)
+tffamlist <- tffamlist %>% unique()
+y1hfam <- left_join(y1h, tffamlist)
+y1hfam <- unique(y1hfam)
+#write.csv(y1hfam, "tffam_data/tca_network_At&PlantTFDB.csv", row.names = TRUE)
+
+#orphantf <- unique(y1hfam[which(is.na(y1hfam$Family)),3])
+#write.csv(orphantf, "tf_nofam.csv")
+
+tffam<-y1hfam %>% select(TF_AGI, Family) %>% unique() #get TF families without duplicates
+#tffam_count<-count(tffam, family)
+tffam_count<-as.data.frame(table(tffam$Family)) #get number of TFs in each family
+
+family<-unique(tffam$Family) %>% as.character()
+family <- family[!is.na(family)]
+family <- family[-which(str_detect(family, "Orphan"))] #remove Orphan
+
+#testing by complex
+comp <- y1hfam %>% select(TF_AGI, Complex) %>% unique()
+comp_count<-as.data.frame(table(comp$Complex))
+#comp_count<-count(comp, complex)
+#write.table(comp_count, "tffam_R/comp_count.tsv", row.names = F, col.names = F, quote=F, sep="\t")
+comp <- y1hfam %>% select(TF_AGI, Complex, Family) %>% unique()
+#comp_tfcount<-count(comp, complex, family)
+comp_tfcount <- as.data.frame(table(comp$Complex, comp$Family))
+
+```
+
+```{r}
+######by complex and location
+#comploc<-unique(y1hfam[,c(3,5,8)])
+comploc <- y1hfam %>% select(TF_AGI, Complex, Location) %>% unique()
+#comploc_count<-count(comploc, complex, Location)
+comploc$d<-paste(comploc$Complex, comploc$Location, sep = "_")
+comploc_count<-as.data.frame(table(comploc$d))
+
+comploc <- y1hfam %>% select(TF_AGI, Complex, Location, Family) %>% unique()
+#comploc<-unique(y1hfam[,c(3,5,8,9)])
+comploc_tfcount<-as.data.frame(table(comploc$Complex, comploc$Location, comploc$Family))
+comploc_tfcount$e<-paste(comploc_tfcount$Var1, comploc_tfcount$Var2, sep = "_")
+
+comploc_sub <- comploc_tfcount
+comploc_sub <- comploc_sub %>% filter(Var3 != "Orphan")
+comploc_sub <- left_join(comploc_sub %>% rename(n=Freq), tffam_count %>% rename(TF_fam=Freq), by = c("Var3"="Var1"))
+comploc_sub <- left_join(comploc_sub, comploc_count %>% rename(comploc_n=Freq), by = c("e" = "Var1"))
+
+comploc_sub$b <- comploc_sub$comploc_n - comploc_sub$n
+comploc_sub$c <- comploc_sub$TF_fam - comploc_sub$n
+comploc_sub$d <- 962 - (comploc_sub$n + comploc_sub$b + comploc_sub$c)
+comploc_sub$tfpercentage <- (comploc_sub$n/comploc_sub$comploc_n) * 100 
+#comploc_sub$enrichpv <- rep(NA, nrow(comploc_sub))
+#comploc_sub <- comploc_sub[complete.cases(comploc_sub[,11]),]
+
+complexlocation<-unique(comploc_count$Var1) %>% as.character
+
+comploclist<-list()
+
+for (f in family){
+  for (cl in complexlocation){
+    a = as.integer(comploc_tfcount[which(comploc_tfcount$e==cl & comploc_tfcount$Var3==f),4])
+    b = as.integer(comploc_count[which(comploc_count$Var1==cl), 2] - a)
+    c = as.integer(tffam_count[which(tffam_count$Var1==f), 2] - a)
+    d = as.integer(962 - c - comploc_count[which(comploc_count$Var1==cl), 2])
+    m = matrix(c(a,b,c,d), nrow = 2, ncol=2)
+    t = fisher.test(m, alternative = "greater")
+    comploclist[[f]][cl]<-t[1]
+  }
+}
+
+comploc_fisher<-do.call(rbind.data.frame, comploclist)
+comploc_fisher$tffam<-rownames(comploc_fisher)
+write.csv(comploc_fisher, "comploc_fisher_rawp.csv")
+
+comploc_t <-as.list(comploc_fisher)
+comploc_adj<-list()
+
+for (i in names(comploc_t[1:18])){
+  t<-as.data.frame(cbind(comploc_t[i], comploc_fisher[19]))
+  t<-t[order(t[1]),]
+  t$adjp<-p.adjust(t[,1], method = "holm")
+  t<-t[order(t[2]),]
+  comploc_adj[[i]]<-t[,c(2,3)]
+}
+
+complocf<-as.data.frame(comploc_adj)
+c<-1:ncol(complocf)
+complocf2<-data.frame(complocf[,c%%2==0])
+write.csv(complocf2, "comploc_fisher_adjp_holm.csv")
+
+```
+
+Format and combine together
+
+```{r}
+comploc_fisher <- gather(comploc_fisher, key = enzloc, value = pval, 1:18)
+
+complocf2$tffam <- row.names(complocf2)
+complocf2 <- gather(complocf2, key = enzloc, value = adj.p, 1:18)
+complocf2$enzloc <- gsub(".adjp", "", complocf2$enzloc)
+
+complocpv <- full_join(comploc_fisher, complocf2)
+comploc_sub <- left_join(comploc_sub, complocpv, by = c("e"= "enzloc", "Var3"="tffam"))
+
+write.csv(comploc_sub, "comploc_percentenrich_pv_holm.csv", row.names = F)
+```
+
+Need to filter out TF family that don't have any sig enrichment
+
+```{r}
+comploc_sub$sig <- rep(NA, nrow(comploc_sub))
+comploc_sub[which(comploc_sub$adj.p < 0.05),14] <- "*"
+
+sigfam <- comploc_sub %>% filter(sig == "*") %>% select(Var3) %>% unique()
+sigfam <- sigfam$Var3
+
+comploc_sig <- comploc_sub %>% filter(Var3 %in% sigfam)
+comploc_sig$barcolor <- rep(NA, nrow(comploc_sig))
+
+comploc_sig[which(comploc_sig$Var1 == "CSY" & comploc_sig$sig == "*"), 15] <- "C"
+
+comploc_sig[which(comploc_sig$Var1 == "FUM" & comploc_sig$sig == "*"), 15] <- "F"
+
+comploc_sig[which(comploc_sig$Var1 == "ICDH" & comploc_sig$sig == "*"), 15] <- "I"
+
+comploc_sig[which(comploc_sig$Var1 == "MDH" & comploc_sig$sig == "*"), 15] <- "M"
+
+comploc_sig[which(comploc_sig$Var1 == "OGDH" & comploc_sig$sig == "*"), 15] <- "O"
+
+comploc_sig[which(comploc_sig$Var1 == "PDH" & comploc_sig$sig == "*"), 15] <- "P"
+
+comploc_sig[which(comploc_sig$Var1 == "SCL" & comploc_sig$sig == "*"), 15] <- "SL"
+
+comploc_sig[which(comploc_sig$Var1 == "SDH" & comploc_sig$sig == "*"), 15] <- "SD"
+
+comploc_sig[is.na(comploc_sig$sig), 15] <- "NS"
+
+comploc_sig$Var1 <- gsub("PDH", "PDC", comploc_sig$Var1)
+comploc_sig$Var1 <- gsub("ICDH", "IDH", comploc_sig$Var1)
+comploc_sig$Var1 <- gsub("OGDH", "OGD", comploc_sig$Var1)
+
+
+comploc_sig$Var1 <- factor(comploc_sig$Var1, c("PDC", "CSY", "ACO", "IDH", "OGD", "SCL", "SDH", "FUM", "MDH"))
+
+comploc_sig$barcolor <- factor(comploc_sig$barcolor, c("P", "C", "I", "O", "SL", "SD", "F", "M", "NS"))
+
+comploc_sig <- comploc_sig[complete.cases(comploc_sig$tfpercentage),]
+```
+
+Color bars by enz color
+
+```{r}
+ggplot(comploc_sig, aes(Var1, tfpercentage, fill = barcolor)) + geom_bar(stat = "identity", width = 0.5, color = "black") + facet_grid(Var3~Var2, labeller = labeller(Var2 =c("cytosol" = "Cytosol", "mitochondrion" = "Mitochondrion", "peroxisome"="Peroxisome", "plastid" = "Plastid"))) + xlab("") + ylab("Percent Enriched") + scale_fill_manual(values = c(
+  "#F39C12",
+  "#FF2E34",
+  "#5BA514",
+  "#004AFF",
+  "#B53471",
+  "#34751B",
+  "#FF627A","#53ADC3", "white")) + theme_light() + theme(strip.background = element_rect(
+     color="black", fill="white", size = 0.2, linetype="solid"), strip.text = element_text(color = "black"), axis.text.x = element_text(angle = 45, hjust = 1)) + guides(fill = FALSE)
+
+ggsave("tf_fam_enrichall.pdf", height = 12, width = 8)
+ggsave("tf_fam_enrichall.svg", height = 14, width = 6)
+```
+
+Try plot each compartment
+
+```{r}
+comploc_sig %>% filter(Var2 == "cytosol", adj.p != "NA", Var3 %in% c("C2C2-Gata", "G2-like", "GeBP","MYB", "Trihelix")) %>% ggplot(aes(Var1, tfpercentage, fill=barcolor)) + geom_bar(stat = "identity", width = 0.5, color = "black") + facet_wrap(~Var3, nrow = 5) + scale_fill_manual(values = c("#5BA514", "#53ADC3", "white"))
+
+
+comploc_sig %>% filter(Var2 == "cytosol", adj.p != "NA", Var3 %in% c("C2C2-Gata", "G2-like", "GeBP","MYB", "Trihelix")) %>% ggplot(aes(Var1, tfpercentage, fill=barcolor)) + geom_bar(stat = "identity", width = 0.5, color = "black") + facet_wrap(~Var3, nrow = 5)
+```
+
+
